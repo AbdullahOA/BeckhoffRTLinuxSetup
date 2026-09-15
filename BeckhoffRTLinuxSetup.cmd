@@ -30,7 +30,7 @@ exit /b 0
          initializes TcHmiSrv, opens TCP 2020, then applies DHCP/static last.
 #>
 $ErrorActionPreference = 'Continue'
-$ToolVersion = '1.0.0'
+$ToolVersion = '1.1.0'
 $ToolAuthor  = 'Abdullah Omar, Beckhoff UAE'
 $Disclaimer  = @"
 UNOFFICIAL TOOL - PLEASE READ
@@ -64,7 +64,7 @@ $RemoteScript = @'
 set -euo pipefail
 
 PROXY_PORT=1080; NET_MODE=dhcp; NET_IFACE=end0; NET_ADDR=""; NET_GW=""; NET_DNS=""
-SET_TIME=""; UI_AUTOSTART=0; FULL_UPGRADE=0; DELETE_CREDS=0; FROM_STDIN=0
+SET_TIME=""; UI_AUTOSTART=0; UI_URL=""; UI_KIOSK=""; FULL_UPGRADE=0; DELETE_CREDS=0; FROM_STDIN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --proxy-port)   PROXY_PORT=$2; shift 2 ;;
@@ -75,6 +75,8 @@ while [[ $# -gt 0 ]]; do
     --dns)          NET_DNS=$2; shift 2 ;;
     --set-time)     SET_TIME=$2; shift 2 ;;
     --ui-autostart) UI_AUTOSTART=1; shift ;;
+    --ui-url)       UI_URL=$2; shift 2 ;;
+    --ui-kiosk)     UI_KIOSK=$2; shift 2 ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --delete-creds) DELETE_CREDS=1; shift ;;
     --from-stdin)   FROM_STDIN=1; shift ;;
@@ -231,15 +233,73 @@ if [[ -f "$HMI_MARK" ]]; then
 fi
 
 # ---- TF1200 UI client ---------------------------------------------------------
+UI_USER=Administrator
+UI_BIN=/etc/TwinCAT/Functions/TF1200-UI-Client/TF1200-UI-Client
 if [[ $UI_AUTOSTART -eq 1 ]]; then
-  step "TF1200 UI Client - autologin + autostart for Administrator"
+  step "TF1200 UI Client - autologin + autostart for $UI_USER"
   SETUP=/etc/TwinCAT/Functions/TF1200-UI-Client/scripts/setup-full.sh
   if [[ -x "$SETUP" ]]; then
-    "$SETUP" --user=Administrator --autologin --autostart
-    ok "config: /home/Administrator/.config/TF1200-UI-Client/config.json"
+    "$SETUP" --user=$UI_USER --autologin --autostart
+    ok "setup-full.sh done (takes effect after reboot)"
   else
     warn "$SETUP not found - run the TF1200 setup manually"
   fi
+fi
+# startUrl / kiosk mode live in ~/.config/TF1200-UI-Client/config.json (created on the client's
+# first start, or with 'TF1200-UI-Client --exit'). Create or patch it.
+if [[ -n "$UI_URL" || -n "$UI_KIOSK" ]]; then
+  step "TF1200 UI Client - config.json"
+  UI_HOME=$(getent passwd "$UI_USER" | cut -d: -f6)
+  UI_DIR="$UI_HOME/.config/TF1200-UI-Client"; UI_CFG="$UI_DIR/config.json"
+  if [[ ! -f "$UI_CFG" && -x "$UI_BIN" ]]; then
+    # let the client write its own defaults first (needs no display for --exit on most builds)
+    timeout 30 sudo -u "$UI_USER" env HOME="$UI_HOME" "$UI_BIN" --exit >/dev/null 2>&1 || true
+  fi
+  install -d -o "$UI_USER" -g "$UI_USER" -m 700 "$UI_DIR"
+  if [[ -f "$UI_CFG" ]] && command -v python3 >/dev/null 2>&1; then
+    python3 - "$UI_CFG" "$UI_URL" "$UI_KIOSK" <<'PY'
+import json, sys
+path, url, kiosk = sys.argv[1:4]
+try:
+    with open(path) as f: cfg = json.load(f)
+except Exception:
+    cfg = {}
+if url:   cfg["startUrl"] = url
+if kiosk: cfg["enableKioskMode"] = (kiosk == "1")
+cfg.setdefault("configVersion", "1.5")
+cfg.setdefault("autoUpdateConfig", True)
+with open(path, "w") as f: json.dump(cfg, f, indent=2)
+PY
+    ok "patched $UI_CFG"
+  elif [[ -f "$UI_CFG" ]]; then
+    # no python: sed the keys in place, append them if missing
+    esc=$(printf '%s' "$UI_URL" | sed -e 's/[\\&|]/\\&/g')
+    if [[ -n "$UI_URL" ]]; then
+      if grep -q '"startUrl"' "$UI_CFG"; then sed -i -E "s|\"startUrl\"[[:space:]]*:[[:space:]]*\"[^\"]*\"|\"startUrl\": \"$esc\"|" "$UI_CFG"
+      else sed -i "0,/{/s|{|{\n  \"startUrl\": \"$esc\",|" "$UI_CFG"; fi
+    fi
+    if [[ -n "$UI_KIOSK" ]]; then
+      kb=$([[ "$UI_KIOSK" == "1" ]] && echo true || echo false)
+      if grep -q '"enableKioskMode"' "$UI_CFG"; then sed -i -E "s|\"enableKioskMode\"[[:space:]]*:[[:space:]]*(true\|false)|\"enableKioskMode\": $kb|" "$UI_CFG"
+      else sed -i "0,/{/s|{|{\n  \"enableKioskMode\": $kb,|" "$UI_CFG"; fi
+    fi
+    ok "patched $UI_CFG (sed)"
+  else
+    # nothing there yet: write a minimal file; the client fills in the rest (autoUpdateConfig)
+    kb=$([[ "$UI_KIOSK" == "1" ]] && echo true || echo false)
+    {
+      echo "{"
+      echo "  \"configVersion\": \"1.5\","
+      echo "  \"autoUpdateConfig\": true,"
+      [[ -n "$UI_URL" ]] && echo "  \"startUrl\": \"$UI_URL\","
+      echo "  \"enableKioskMode\": $kb"
+      echo "}"
+    } > "$UI_CFG"
+    ok "created $UI_CFG"
+  fi
+  chown "$UI_USER:$UI_USER" "$UI_CFG"; chmod 600 "$UI_CFG"
+  [[ -n "$UI_URL" ]] && ok "startUrl = $UI_URL"
+  [[ -n "$UI_KIOSK" ]] && ok "enableKioskMode = $([[ "$UI_KIOSK" == "1" ]] && echo true || echo false)"
 fi
 
 # ---- credentials retention -----------------------------------------------------
@@ -395,6 +455,8 @@ try {
         if ($P.NetDns) { $args += @('--dns', $P.NetDns) }
     } else { $args += @('--dhcp', '--iface', $P.NetIface) }
     if ($P.UiAutostart) { $args += '--ui-autostart' }
+    if ($P.UiUrl)       { $args += @('--ui-url', $P.UiUrl) }
+    if ($P.UiKiosk -ne $null) { $args += @('--ui-kiosk', $(if ($P.UiKiosk) { '1' } else { '0' })) }
     if ($P.FullUpgrade) { $args += '--full-upgrade' }
     if ($P.DeleteCreds) { $args += '--delete-creds' }
 
@@ -429,7 +491,7 @@ $script:devices = @()
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Beckhoff RT Linux Setup v$ToolVersion  -  UNOFFICIAL tool by $ToolAuthor"
-$form.ClientSize = New-Object System.Drawing.Size(760, 820)
+$form.ClientSize = New-Object System.Drawing.Size(760, 850)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedSingle'
 $form.MaximizeBox = $false
@@ -490,15 +552,20 @@ $lblBhfHint = Add-Label $g2 'Leave both empty to keep an existing /etc/apt/auth.
 $lblBhfHint.Size = New-Object System.Drawing.Size(270, 50)
 
 # ---- 3. HMI
-$g3 = Add-Group '3. TwinCAT HMI Server (TF2000) / UI Client (TF1200)' 234 88
+$g3 = Add-Group '3. TwinCAT HMI Server (TF2000) / UI Client (TF1200)' 234 118
 Add-Label $g3 'HMI admin password' 12 26 | Out-Null
 $txtHmiPw = Add-Text $g3 150 26 200 -Password
 Add-Label $g3 'Repeat' 12 56 | Out-Null
 $txtHmiPw2 = Add-Text $g3 150 56 200 -Password
-$chkUiAutostart = Add-Check $g3 'TF1200 UI Client: autologin + autostart for Administrator (kiosk / panel)' 370 26 360
+$chkUiAutostart = Add-Check $g3 'TF1200 UI Client: autologin + autostart for Administrator' 370 26 360
+$chkUiKiosk = Add-Check $g3 'Kiosk mode (full screen, no menu bar)' 370 56 360
+Add-Label $g3 'UI Client start URL' 12 86 | Out-Null
+$txtUiUrl = Add-Text $g3 150 86 400 -Default 'http://127.0.0.1:2020/'
+$lblUiHint = Add-Label $g3 '(startUrl in config.json; empty = leave as is)' 560 86 170
+$lblUiHint.Size = New-Object System.Drawing.Size(170, 40)
 
 # ---- 4. network
-$g4 = Add-Group '4. Controller IP address (applied last, via systemd-networkd)' 330 130
+$g4 = Add-Group '4. Controller IP address (applied last, via systemd-networkd)' 360 130
 $rbDhcp = New-Object System.Windows.Forms.RadioButton
 $rbDhcp.Text = 'Keep DHCP / auto (factory default)'; $rbDhcp.Location = New-Object System.Drawing.Point(15, 26); $rbDhcp.Size = New-Object System.Drawing.Size(260, 22); $rbDhcp.Checked = $true
 $rbStatic = New-Object System.Windows.Forms.RadioButton
@@ -518,23 +585,23 @@ foreach ($c in @($txtAddr, $txtGw, $txtDns)) { $c.Enabled = $false }
 $rbStatic.Add_CheckedChanged({ foreach ($c in @($txtAddr, $txtGw, $txtDns)) { $c.Enabled = $rbStatic.Checked } })
 
 # ---- 5. options
-$g5 = Add-Group '5. Options' 468 58
+$g5 = Add-Group '5. Options' 498 58
 Add-Label $g5 'Reverse proxy port' 12 24 | Out-Null
 $txtProxyPort = Add-Text $g5 150 24 70 -Default '1080'
 $chkFullUpgrade = Add-Check $g5 'apt full-upgrade first' 240 24 170
 $chkDeleteCreds = Add-Check $g5 'Delete bhf.conf when finished' 420 24 230
 
 # ---- run / log
-$btnRun = Add-Button $form 'Run setup' 12 536 140
+$btnRun = Add-Button $form 'Run setup' 12 566 140
 $btnRun.Enabled = $false
-$lblStatus = Add-Label $form 'Pick the adapter connected to the controller, then Discover.' 170 538 570
+$lblStatus = Add-Label $form 'Pick the adapter connected to the controller, then Discover.' 170 568 570
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true; $txtLog.ReadOnly = $true; $txtLog.ScrollBars = 'Vertical'; $txtLog.WordWrap = $false
 $txtLog.Font = New-Object System.Drawing.Font('Consolas', 9)
-$txtLog.Location = New-Object System.Drawing.Point(12, 572); $txtLog.Size = New-Object System.Drawing.Size(736, 216)
+$txtLog.Location = New-Object System.Drawing.Point(12, 602); $txtLog.Size = New-Object System.Drawing.Size(736, 216)
 $txtLog.BackColor = [System.Drawing.Color]::White
 $form.Controls.Add($txtLog)
-$lblFooter = Add-Label $form "Unofficial tool by $ToolAuthor - not an official or supported Beckhoff product. Use at your own risk." 12 794 736
+$lblFooter = Add-Label $form "Unofficial tool by $ToolAuthor - not an official or supported Beckhoff product. Use at your own risk." 12 824 736
 $lblFooter.ForeColor = [System.Drawing.Color]::DarkRed
 
 function Log([string]$m) { $txtLog.AppendText($m + "`r`n") }
@@ -676,6 +743,8 @@ $btnRun.Add_Click({
     $port = 0
     if (-not [int]::TryParse($txtProxyPort.Text, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) { $errs += 'Proxy port must be 1024-65535.' }
     if ($cbIface.SelectedIndex -lt 0) { $errs += 'No controller interface selected - Connect first.' }
+    $uiUrl = $txtUiUrl.Text.Trim()
+    if ($uiUrl -and ($uiUrl -notmatch '^(https?|file)://\S+$' -or $uiUrl -match '["\\]')) { $errs += 'UI Client start URL must look like http://127.0.0.1:2020/ (or https:// / file://), without quotes or spaces.' }
     if ($rbStatic.Checked) {
         if (-not ($txtAddr.Text -match '^(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})$' -and (Test-IPv4 $Matches[1]) -and [int]$Matches[2] -ge 1 -and [int]$Matches[2] -le 30)) { $errs += 'Static address must look like 192.168.1.100/24.' }
         if ($txtGw.Text -and -not (Test-IPv4 $txtGw.Text)) { $errs += 'Gateway is not a valid IPv4 address.' }
@@ -691,7 +760,8 @@ $btnRun.Add_Click({
         AdminPw = $txtAdminPw.Text; BhfMail = $txtBhfMail.Text.Trim(); BhfPw = $txtBhfPw.Text; HmiPw = $txtHmiPw.Text
         NetMode = $(if ($rbStatic.Checked) { 'static' } else { 'dhcp' })
         NetIface = $cbIface.SelectedItem; NetAddr = $txtAddr.Text.Trim(); NetGw = $txtGw.Text.Trim(); NetDns = $txtDns.Text.Trim()
-        ProxyPort = $port; UiAutostart = $chkUiAutostart.Checked; FullUpgrade = $chkFullUpgrade.Checked; DeleteCreds = $chkDeleteCreds.Checked
+        ProxyPort = $port; UiAutostart = $chkUiAutostart.Checked; UiUrl = $uiUrl; UiKiosk = $chkUiKiosk.Checked
+        FullUpgrade = $chkFullUpgrade.Checked; DeleteCreds = $chkDeleteCreds.Checked
     }
 })
 
