@@ -1,0 +1,22 @@
+UNOFFICIAL TOOL - PLEASE READ BEFORE INSTALLING
+
+"Beckhoff RT Linux Setup" was created by Abdullah Omar (Beckhoff UAE) as a
+personal convenience utility.
+
+It is NOT an official Beckhoff product and is NOT supported, tested or
+endorsed by Beckhoff Automation GmbH & Co. KG or any of its subsidiaries.
+Beckhoff Automation accepts no responsibility for its use.
+
+When you use it on a controller it will:
+  - install an SSH key and log in as Administrator
+  - install packages from deb.beckhoff.com using your myBeckhoff account
+  - initialize the TwinCAT HMI Server and change firewall rules
+  - change the IP configuration if you choose "Static IPv4"
+
+Use it only on controllers you are allowed to modify, and at your own risk.
+Back up any existing configuration first.
+
+For the supported, official procedures refer to the Beckhoff RT Linux
+documentation on infosys.beckhoff.com and to your Beckhoff support contact.
+
+Requirements: Windows 10/11 with the built-in "OpenSSH Client" feature.

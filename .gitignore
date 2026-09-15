@@ -1,0 +1,7 @@
+# build output (not committed - customers get the .cmd, or a release asset)
+build/
+dist/
+*.exe
+# scratch
+*.log
+Thumbs.db
