@@ -16,7 +16,7 @@
          initializes TcHmiSrv, opens TCP 2020, then applies DHCP/static last.
 #>
 $ErrorActionPreference = 'Continue'
-$ToolVersion = '1.2.0'
+$ToolVersion = '1.2.1'
 $ToolAuthor  = 'Abdullah Omar, Beckhoff UAE'
 $Disclaimer  = @"
 UNOFFICIAL TOOL - PLEASE READ
@@ -198,10 +198,24 @@ if [[ $LIST_ONLY -eq 1 ]]; then
   : > /tmp/bhf-avail.tsv
   for f in /var/lib/apt/lists/deb.beckhoff.com_*_Packages /var/lib/apt/lists/deb-mirror.beckhoff.com_*_Packages; do
     [[ -f "$f" ]] || continue
-    awk 'BEGIN{RS=""; FS="\n"} { p="";v="";d=""; for(i=1;i<=NF;i++){ if($i ~ /^Package: /) p=substr($i,10); else if($i ~ /^Version: /) v=substr($i,10); else if($i ~ /^Description: /) d=substr($i,14) } if(p!="") print p "\t" v "\t" d }' "$f" >> /tmp/bhf-avail.tsv
+    # deb.beckhoff.com mirrors all of Debian; keep only Beckhoff's own packages:
+    # maintainer/homepage mentions Beckhoff, or the name looks like a Beckhoff product
+    # (tc/tf/te/tx + digits, or contains beckhoff/bhf/twincat/tcpkg).
+    awk 'BEGIN{RS=""; FS="\n"} {
+      p="";v="";d="";m="";h="";
+      for(i=1;i<=NF;i++){
+        if($i ~ /^Package: /) p=substr($i,10);
+        else if($i ~ /^Version: /) v=substr($i,10);
+        else if($i ~ /^Description: /) d=substr($i,14);
+        else if($i ~ /^Maintainer: /) m=tolower($i);
+        else if($i ~ /^Homepage: /) h=tolower($i);
+      }
+      if(p=="") next;
+      if(m ~ /beckhoff/ || h ~ /beckhoff/ || p ~ /^(tc|tf|te|tx)[0-9]/ || p ~ /(beckhoff|bhf|twincat|tcpkg)/) print p "\t" v "\t" d
+    }' "$f" >> /tmp/bhf-avail.tsv
   done
   n=$(sort -t$'\t' -k1,1 -k2,2Vr /tmp/bhf-avail.tsv | awk -F'\t' '!seen[$1]++' | tee /tmp/bhf-avail-uniq.tsv | wc -l)
-  ok "$n packages available from the Beckhoff feed(s)"
+  ok "$n Beckhoff packages available (Debian mirror packages filtered out)"
   echo "BHF-PKGS-BEGIN"
   awk -F'\t' 'NR==FNR{inst[$1]=$2; next} {print $1 "\t" $2 "\t" (($1 in inst)? inst[$1] : "") "\t" $3}' /tmp/bhf-inst.tsv /tmp/bhf-avail-uniq.tsv
   echo "BHF-PKGS-END"
@@ -770,31 +784,46 @@ function Show-PackageDialog($pkgs) {
     $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
     $hdr = New-Object System.Windows.Forms.Label
-    $hdr.Text = 'Tick the packages to install. Already-installed packages are marked; ticking them is harmless (apt skips them).'
-    $hdr.Location = New-Object System.Drawing.Point(12, 10); $hdr.Size = New-Object System.Drawing.Size(836, 20)
+    $hdr.Text = 'Tick the packages to install. Installed ones are marked; ticking them is harmless (apt skips them).'
+    $hdr.Location = New-Object System.Drawing.Point(12, 10); $hdr.Size = New-Object System.Drawing.Size(640, 20)
     $dlg.Controls.Add($hdr)
+    $lblF = New-Object System.Windows.Forms.Label; $lblF.Text = 'Search:'; $lblF.Location = New-Object System.Drawing.Point(660, 10); $lblF.Size = New-Object System.Drawing.Size(50, 20)
+    $txtF = New-Object System.Windows.Forms.TextBox; $txtF.Location = New-Object System.Drawing.Point(712, 7); $txtF.Size = New-Object System.Drawing.Size(136, 23)
+    $dlg.Controls.AddRange(@($lblF, $txtF))
     $lst = New-Object System.Windows.Forms.CheckedListBox
     $lst.Location = New-Object System.Drawing.Point(12, 34); $lst.Size = New-Object System.Drawing.Size(836, 440)
     $lst.CheckOnClick = $true; $lst.Font = New-Object System.Drawing.Font('Consolas', 9); $lst.HorizontalScrollbar = $true
-    $names = @()
-    foreach ($pk in $pkgs) {
-        $ver = if ($pk.Installed) { "installed $($pk.Installed)" } else { $pk.Version }
-        $i = $lst.Items.Add(("{0,-30} {1,-26} {2}" -f $pk.Name, $ver, $pk.Desc))
-        if ($script:selectedPackages -contains $pk.Name) { $lst.SetItemChecked($i, $true) }
-        $names += $pk.Name
-    }
     $dlg.Controls.Add($lst)
+    # checked state lives in a hashtable so filtering the visible list never loses a tick
+    $checked = @{}
+    foreach ($pk in $pkgs) { $checked[$pk.Name] = ($script:selectedPackages -contains $pk.Name) }
+    $visible = @()   # names shown in the list, in order
+    $rebuild = {
+        $lst.BeginUpdate(); $lst.Items.Clear(); $script:dlgVisible = @()
+        $q = $txtF.Text.Trim().ToLower()
+        foreach ($pk in $pkgs) {
+            if ($q -and ($pk.Name.ToLower().IndexOf($q) -lt 0) -and ($pk.Desc.ToLower().IndexOf($q) -lt 0)) { continue }
+            $ver = if ($pk.Installed) { "installed $($pk.Installed)" } else { $pk.Version }
+            $i = $lst.Items.Add(("{0,-30} {1,-26} {2}" -f $pk.Name, $ver, $pk.Desc))
+            $lst.SetItemChecked($i, $checked[$pk.Name])
+            $script:dlgVisible += $pk.Name
+        }
+        $lst.EndUpdate()
+    }
+    $lst.Add_ItemCheck({ param($sender, $e) $checked[$script:dlgVisible[$e.Index]] = ($e.NewValue -eq 'Checked') })
+    $txtF.Add_TextChanged({ & $rebuild })
+    & $rebuild
     $bDef = New-Object System.Windows.Forms.Button; $bDef.Text = 'Defaults'; $bDef.Location = New-Object System.Drawing.Point(12, 484); $bDef.Size = New-Object System.Drawing.Size(90, 27)
     $bNone = New-Object System.Windows.Forms.Button; $bNone.Text = 'None';    $bNone.Location = New-Object System.Drawing.Point(108, 484); $bNone.Size = New-Object System.Drawing.Size(90, 27)
     $bOk = New-Object System.Windows.Forms.Button;  $bOk.Text = 'OK';      $bOk.Location = New-Object System.Drawing.Point(662, 484); $bOk.Size = New-Object System.Drawing.Size(90, 27); $bOk.DialogResult = 'OK'
     $bCan = New-Object System.Windows.Forms.Button; $bCan.Text = 'Cancel';  $bCan.Location = New-Object System.Drawing.Point(758, 484); $bCan.Size = New-Object System.Drawing.Size(90, 27); $bCan.DialogResult = 'Cancel'
-    $bDef.Add_Click({ for ($i = 0; $i -lt $names.Count; $i++) { $lst.SetItemChecked($i, ($DefaultPackages -contains $names[$i])) } })
-    $bNone.Add_Click({ for ($i = 0; $i -lt $names.Count; $i++) { $lst.SetItemChecked($i, $false) } })
+    $bDef.Add_Click({ foreach ($k in @($checked.Keys)) { $checked[$k] = ($DefaultPackages -contains $k) }; & $rebuild })
+    $bNone.Add_Click({ foreach ($k in @($checked.Keys)) { $checked[$k] = $false }; & $rebuild })
     $dlg.Controls.AddRange(@($bDef, $bNone, $bOk, $bCan))
     $dlg.AcceptButton = $bOk; $dlg.CancelButton = $bCan
     if ($dlg.ShowDialog($form) -eq 'OK') {
         $sel = @()
-        for ($i = 0; $i -lt $names.Count; $i++) { if ($lst.GetItemChecked($i)) { $sel += $names[$i] } }
+        foreach ($pk in $pkgs) { if ($checked[$pk.Name]) { $sel += $pk.Name } }
         $script:selectedPackages = $sel
         Update-PackageLabel
         Log "==> Packages selected: $(if ($sel.Count) { $sel -join ' ' } else { '(none)' })"
