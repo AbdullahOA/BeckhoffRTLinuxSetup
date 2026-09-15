@@ -51,7 +51,7 @@ set -euo pipefail
 
 PROXY_PORT=1080; NET_MODE=dhcp; NET_IFACE=end0; NET_ADDR=""; NET_GW=""; NET_DNS=""
 SET_TIME=""; UI_AUTOSTART=0; UI_URL=""; UI_KIOSK=""; UI_USER=Administrator; FULL_UPGRADE=0; DELETE_CREDS=0; FROM_STDIN=0
-LIST_ONLY=0; TESTING=0; PACKAGES="tc31-xar-um tf2000-hmi-server tf1200-ui-client"
+LIST_ONLY=0; TESTING=0; SKIP_HMI=0; PACKAGES="tc31-xar-um tf2000-hmi-server tf1200-ui-client"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --proxy-port)   PROXY_PORT=$2; shift 2 ;;
@@ -68,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --packages)     PACKAGES=$2; shift 2 ;;
     --testing)      TESTING=1; shift ;;
     --list-only)    LIST_ONLY=1; shift ;;
+    --skip-hmi)     SKIP_HMI=1; shift ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --delete-creds) DELETE_CREDS=1; shift ;;
     --from-stdin)   FROM_STDIN=1; shift ;;
@@ -244,7 +245,9 @@ systemctl is-active --quiet TcSystemServiceUm && ok "TcSystemServiceUm is runnin
 
 # ---- TF2000 HMI server: initialize, firewall, enable -----------------------------
 step "TwinCAT HMI Server (TcHmiSrv)"
-if ! dpkg -s tf2000-hmi-server >/dev/null 2>&1; then
+if [[ $SKIP_HMI -eq 1 ]]; then
+  ok "HMI server setup not requested - skipping initialize / firewall / enable"
+elif ! dpkg -s tf2000-hmi-server >/dev/null 2>&1; then
   ok "tf2000-hmi-server not installed - skipping HMI server setup"
 elif [[ -f "$HMI_MARK" ]] || systemctl is-active --quiet TcHmiSrv.service; then
   ok "TcHmiSrv already initialized - skipping --initialize"
@@ -266,7 +269,7 @@ else
   fi
 fi
 unset HMI_PW HMI_PW2 BHF_PW
-if ! dpkg -s tf2000-hmi-server >/dev/null 2>&1; then :
+if [[ $SKIP_HMI -eq 1 ]] || ! dpkg -s tf2000-hmi-server >/dev/null 2>&1; then :
 elif [[ ! -f /etc/nftables.conf.d/20-hmi.conf ]]; then
   cat > /etc/nftables.conf.d/20-hmi.conf <<'EOF'
 table inet filter {
@@ -543,6 +546,7 @@ try {
     }
 
     $args += @('--packages', "'$($P.Packages)'", '--ui-user', $P.UiUser)
+    if (-not $P.SetupHmi) { $args += '--skip-hmi' }
     if ($P.NetMode -eq 'static') {
         $args += @('--static', $P.NetAddr, '--iface', $P.NetIface)
         if ($P.NetGw)  { $args += @('--gateway', $P.NetGw) }
@@ -660,22 +664,25 @@ function Update-PackageLabel {
 Update-PackageLabel
 
 # ---- 3. HMI
-$g3 = Add-Group '3. TwinCAT HMI Server (TF2000) / UI Client (TF1200)' 296 118
-Add-Label $g3 'HMI admin password' 12 26 | Out-Null
-$txtHmiPw = Add-Text $g3 150 26 200 -Password
-Add-Label $g3 'Repeat' 12 56 | Out-Null
-$txtHmiPw2 = Add-Text $g3 150 56 200 -Password
+$g3 = Add-Group '3. TwinCAT HMI Server (TF2000) / UI Client (TF1200)' 296 140
+$chkSetupHmi = Add-Check $g3 'Set up HMI server: initialize, open port 2020, enable service' 12 22 345
+$chkSetupHmi.Checked = $true
+Add-Label $g3 'HMI admin password' 12 52 | Out-Null
+$txtHmiPw = Add-Text $g3 150 50 200 -Password
+Add-Label $g3 'Repeat' 12 80 | Out-Null
+$txtHmiPw2 = Add-Text $g3 150 78 200 -Password
+$chkSetupHmi.Add_CheckedChanged({ $txtHmiPw.Enabled = $chkSetupHmi.Checked; $txtHmiPw2.Enabled = $chkSetupHmi.Checked })
 Add-Label $g3 'UI Client user' 370 26 100 | Out-Null
 $txtUiUser = Add-Text $g3 475 26 130 -Default 'Administrator'
 $lblUiUserHint = Add-Label $g3 '(Linux user; created if missing)' 610 26 120
 $lblUiUserHint.Size = New-Object System.Drawing.Size(120, 40)
 $chkUiAutostart = Add-Check $g3 'TF1200: autologin + autostart for that user' 370 56 360
-Add-Label $g3 'UI Client start URL' 12 86 | Out-Null
-$txtUiUrl = Add-Text $g3 150 86 300 -Default 'http://127.0.0.1:2020/'
-$chkUiKiosk = Add-Check $g3 'Kiosk mode (full screen, no menu bar)' 460 86 270
+Add-Label $g3 'UI Client start URL' 370 86 100 | Out-Null
+$txtUiUrl = Add-Text $g3 475 86 255 -Default 'http://127.0.0.1:2020/'
+$chkUiKiosk = Add-Check $g3 'Kiosk mode (full screen, no menu bar)' 370 112 300
 
 # ---- 4. network
-$g4 = Add-Group '4. Controller IP address (applied last, via systemd-networkd)' 422 130
+$g4 = Add-Group '4. Controller IP address (applied last, via systemd-networkd)' 444 130
 $rbDhcp = New-Object System.Windows.Forms.RadioButton
 $rbDhcp.Text = 'Keep DHCP / auto (factory default)'; $rbDhcp.Location = New-Object System.Drawing.Point(15, 26); $rbDhcp.Size = New-Object System.Drawing.Size(260, 22); $rbDhcp.Checked = $true
 $rbStatic = New-Object System.Windows.Forms.RadioButton
@@ -695,19 +702,19 @@ foreach ($c in @($txtAddr, $txtGw, $txtDns)) { $c.Enabled = $false }
 $rbStatic.Add_CheckedChanged({ foreach ($c in @($txtAddr, $txtGw, $txtDns)) { $c.Enabled = $rbStatic.Checked } })
 
 # ---- 5. options
-$g5 = Add-Group '5. Options' 560 58
+$g5 = Add-Group '5. Options' 582 58
 Add-Label $g5 'Reverse proxy port' 12 24 | Out-Null
 $txtProxyPort = Add-Text $g5 150 24 70 -Default '1080'
 $chkFullUpgrade = Add-Check $g5 'apt full-upgrade before installing packages' 240 24 320
 
 # ---- run / log
-$btnRun = Add-Button $form 'Run setup' 12 628 140
+$btnRun = Add-Button $form 'Run setup' 12 650 140
 $btnRun.Enabled = $false
-$lblStatus = Add-Label $form 'Pick the adapter connected to the controller, then Discover.' 170 630 570
+$lblStatus = Add-Label $form 'Pick the adapter connected to the controller, then Discover.' 170 652 570
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true; $txtLog.ReadOnly = $true; $txtLog.ScrollBars = 'Vertical'; $txtLog.WordWrap = $false
 $txtLog.Font = New-Object System.Drawing.Font('Consolas', 9)
-$txtLog.Location = New-Object System.Drawing.Point(12, 664); $txtLog.Size = New-Object System.Drawing.Size(736, 186)
+$txtLog.Location = New-Object System.Drawing.Point(12, 686); $txtLog.Size = New-Object System.Drawing.Size(736, 164)
 $txtLog.BackColor = [System.Drawing.Color]::White
 $form.Controls.Add($txtLog)
 $lblFooter = Add-Label $form "Unofficial tool by $ToolAuthor - not an official or supported Beckhoff product. Use at your own risk." 12 856 736
@@ -942,8 +949,10 @@ $btnRun.Add_Click({
     if (-not $txtAdminPw.Text) { $errs += 'Administrator password is required (sudo).' }
     if (($txtBhfMail.Text -ne '') -ne ($txtBhfPw.Text -ne '')) { $errs += 'myBeckhoff: enter both e-mail and password, or neither.' }
     if ($txtBhfPw.Text -match '\s') { $errs += "myBeckhoff password contains whitespace - apt's netrc format cannot store that; change it on myBeckhoff first." }
-    if ($txtHmiPw.Text -ne $txtHmiPw2.Text) { $errs += 'HMI passwords do not match.' }
-    if (-not $txtHmiPw.Text -and ($script:selectedPackages -contains 'tf2000-hmi-server')) { $errs += 'HMI admin password is required (TcHmiSrv --initialize).' }
+    if ($chkSetupHmi.Checked) {
+        if ($txtHmiPw.Text -ne $txtHmiPw2.Text) { $errs += 'HMI passwords do not match.' }
+        if (-not $txtHmiPw.Text) { $errs += 'HMI admin password is required when "Set up HMI server" is ticked (untick it to skip the HMI server).' }
+    }
     if ($script:selectedPackages.Count -eq 0) { $errs += 'No packages selected - use "Fetch package list..." to pick at least one.' }
     $uiUser = $txtUiUser.Text.Trim()
     if ($uiUser -notmatch '^[a-z_][a-z0-9_-]{0,31}$' -and $uiUser -ne 'Administrator') { $errs += 'UI Client user must be a valid Linux user name (lowercase letters, digits, - and _), or Administrator.' }
@@ -964,7 +973,8 @@ $btnRun.Add_Click({
         Phase = 'run'; SshExe = $sshExe; SshKeygenExe = $keygenExe; KeyPath = $keyPath
         User = 'Administrator'; Target = $d.Target; DeviceMac = $d.Mac
         RemoteScript = $RemoteScript
-        AdminPw = $txtAdminPw.Text; BhfMail = $txtBhfMail.Text.Trim(); BhfPw = $txtBhfPw.Text; HmiPw = $txtHmiPw.Text
+        AdminPw = $txtAdminPw.Text; BhfMail = $txtBhfMail.Text.Trim(); BhfPw = $txtBhfPw.Text
+        HmiPw = $(if ($chkSetupHmi.Checked) { $txtHmiPw.Text } else { '' }); SetupHmi = $chkSetupHmi.Checked
         NetMode = $(if ($rbStatic.Checked) { 'static' } else { 'dhcp' })
         NetIface = $cbIface.SelectedItem; NetAddr = $txtAddr.Text.Trim(); NetGw = $txtGw.Text.Trim(); NetDns = $txtDns.Text.Trim()
         ProxyPort = $port; UiAutostart = $chkUiAutostart.Checked; UiUrl = $uiUrl; UiKiosk = $chkUiKiosk.Checked; UiUser = $uiUser
