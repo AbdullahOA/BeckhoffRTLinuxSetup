@@ -2,7 +2,7 @@
 ; Compiled by Build-Release.ps1; needs Inno Setup 6.3 or newer (winget install JRSoftware.InnoSetup)
 
 #define MyAppName      "Beckhoff RT Linux Setup (unofficial)"
-#define MyAppVersion   "1.2.1"
+#define MyAppVersion   "1.2.2"
 #define MyAppPublisher "Abdullah Omar, Beckhoff UAE - personal tool, not a Beckhoff product"
 #define MyAppExeName   "BeckhoffRTLinuxSetup.exe"
 
@@ -66,6 +66,8 @@ begin
            'Ask an administrator to enable it: Settings > Apps > Optional features > OpenSSH Client.',
            mbInformation, MB_OK);
 end;
+
+
 
 
 

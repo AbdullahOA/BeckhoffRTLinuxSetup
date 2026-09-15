@@ -16,7 +16,7 @@
          initializes TcHmiSrv, opens TCP 2020, then applies DHCP/static last.
 #>
 $ErrorActionPreference = 'Continue'
-$ToolVersion = '1.2.1'
+$ToolVersion = '1.2.2'
 $ToolAuthor  = 'Abdullah Omar, Beckhoff UAE'
 $Disclaimer  = @"
 UNOFFICIAL TOOL - PLEASE READ
@@ -198,9 +198,10 @@ if [[ $LIST_ONLY -eq 1 ]]; then
   : > /tmp/bhf-avail.tsv
   for f in /var/lib/apt/lists/deb.beckhoff.com_*_Packages /var/lib/apt/lists/deb-mirror.beckhoff.com_*_Packages; do
     [[ -f "$f" ]] || continue
-    # deb.beckhoff.com mirrors all of Debian; keep only Beckhoff's own packages:
-    # maintainer/homepage mentions Beckhoff, or the name looks like a Beckhoff product
-    # (tc/tf/te/tx + digits, or contains beckhoff/bhf/twincat/tcpkg).
+    # deb.beckhoff.com mirrors all of Debian. Classify:
+    #   product = Beckhoff product (tc31-, tf2000-, tf610x-, te1000-, twincat-*, tcpkg, *beckhoff*, *bhf*)
+    #   other   = Debian packages rebuilt/maintained by Beckhoff (+bhfN versions, kernel libs, DPDK ...)
+    #   everything else (plain Debian mirror content) is dropped
     awk 'BEGIN{RS=""; FS="\n"} {
       p="";v="";d="";m="";h="";
       for(i=1;i<=NF;i++){
@@ -211,13 +212,17 @@ if [[ $LIST_ONLY -eq 1 ]]; then
         else if($i ~ /^Homepage: /) h=tolower($i);
       }
       if(p=="") next;
-      if(m ~ /beckhoff/ || h ~ /beckhoff/ || p ~ /^(tc|tf|te|tx)[0-9]/ || p ~ /(beckhoff|bhf|twincat|tcpkg)/) print p "\t" v "\t" d
+      if(p ~ /^(tc|tf|te|tx)[0-9][0-9][0-9x]?[0-9x]?-/ || p ~ /(beckhoff|bhf|twincat|tcpkg)/) c="product";
+      else if(m ~ /beckhoff/ || h ~ /beckhoff/ || v ~ /bhf/) c="other";
+      else next;
+      print p "\t" v "\t" d "\t" c
     }' "$f" >> /tmp/bhf-avail.tsv
   done
-  n=$(sort -t$'\t' -k1,1 -k2,2Vr /tmp/bhf-avail.tsv | awk -F'\t' '!seen[$1]++' | tee /tmp/bhf-avail-uniq.tsv | wc -l)
-  ok "$n Beckhoff packages available (Debian mirror packages filtered out)"
+  sort -t$'\t' -k1,1 -k2,2Vr /tmp/bhf-avail.tsv | awk -F'\t' '!seen[$1]++' > /tmp/bhf-avail-uniq.tsv
+  np=$(awk -F'\t' '$4=="product"' /tmp/bhf-avail-uniq.tsv | wc -l); no=$(awk -F'\t' '$4=="other"' /tmp/bhf-avail-uniq.tsv | wc -l)
+  ok "$np Beckhoff product packages, $no other Beckhoff-built packages (Debian mirror content filtered out)"
   echo "BHF-PKGS-BEGIN"
-  awk -F'\t' 'NR==FNR{inst[$1]=$2; next} {print $1 "\t" $2 "\t" (($1 in inst)? inst[$1] : "") "\t" $3}' /tmp/bhf-inst.tsv /tmp/bhf-avail-uniq.tsv
+  awk -F'\t' 'NR==FNR{inst[$1]=$2; next} {print $1 "\t" $2 "\t" (($1 in inst)? inst[$1] : "") "\t" $3 "\t" $4}' /tmp/bhf-inst.tsv /tmp/bhf-avail-uniq.tsv
   echo "BHF-PKGS-END"
   exit 0
 fi
@@ -528,7 +533,7 @@ try {
             if ($line -eq 'BHF-PKGS-END')   { break }
             if (-not $in) { continue }
             $f = $line -split "`t"
-            if ($f.Count -ge 2 -and $f[0]) { $pkgs += @{ Name = $f[0]; Version = $f[1]; Installed = $(if ($f.Count -ge 3) { $f[2] } else { '' }); Desc = $(if ($f.Count -ge 4) { $f[3] } else { '' }) } }
+            if ($f.Count -ge 2 -and $f[0]) { $pkgs += @{ Name = $f[0]; Version = $f[1]; Installed = $(if ($f.Count -ge 3) { $f[2] } else { '' }); Desc = $(if ($f.Count -ge 4) { $f[3] } else { '' }); Cat = $(if ($f.Count -ge 5 -and $f[4]) { $f[4] } else { 'product' }) } }
         }
         if ($pkgs.Count -eq 0) { throw "no packages found in the Beckhoff feed - check the myBeckhoff login and the log" }
         $sync.Packages = $pkgs
@@ -779,7 +784,8 @@ $btnDiscover.Add_Click({
 # ---- package selection dialog
 function Show-PackageDialog($pkgs) {
     $dlg = New-Object System.Windows.Forms.Form
-    $dlg.Text = "Beckhoff packages available from the repository ($($pkgs.Count))"
+    $nProd = @($pkgs | Where-Object { $_.Cat -eq 'product' }).Count
+    $dlg.Text = "Beckhoff packages available from the repository ($nProd products, $($pkgs.Count - $nProd) other)"
     $dlg.ClientSize = New-Object System.Drawing.Size(860, 520)
     $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false
     $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
@@ -787,6 +793,10 @@ function Show-PackageDialog($pkgs) {
     $hdr.Text = 'Tick the packages to install. Installed ones are marked; ticking them is harmless (apt skips them).'
     $hdr.Location = New-Object System.Drawing.Point(12, 10); $hdr.Size = New-Object System.Drawing.Size(640, 20)
     $dlg.Controls.Add($hdr)
+    $chkAll = New-Object System.Windows.Forms.CheckBox
+    $chkAll.Text = 'Show all Beckhoff-built packages (kernel, libraries, rebuilt Debian tools) - not only TwinCAT products'
+    $chkAll.Location = New-Object System.Drawing.Point(210, 482); $chkAll.Size = New-Object System.Drawing.Size(440, 27)
+    $dlg.Controls.Add($chkAll)
     $lblF = New-Object System.Windows.Forms.Label; $lblF.Text = 'Search:'; $lblF.Location = New-Object System.Drawing.Point(660, 10); $lblF.Size = New-Object System.Drawing.Size(50, 20)
     $txtF = New-Object System.Windows.Forms.TextBox; $txtF.Location = New-Object System.Drawing.Point(712, 7); $txtF.Size = New-Object System.Drawing.Size(136, 23)
     $dlg.Controls.AddRange(@($lblF, $txtF))
@@ -798,20 +808,32 @@ function Show-PackageDialog($pkgs) {
     $checked = @{}
     foreach ($pk in $pkgs) { $checked[$pk.Name] = ($script:selectedPackages -contains $pk.Name) }
     $visible = @()   # names shown in the list, in order
+    $script:dlgBuilding = $false
     $rebuild = {
-        $lst.BeginUpdate(); $lst.Items.Clear(); $script:dlgVisible = @()
+        $script:dlgBuilding = $true
+        $lst.BeginUpdate(); $lst.Items.Clear()
+        $vis = New-Object System.Collections.ArrayList
         $q = $txtF.Text.Trim().ToLower()
         foreach ($pk in $pkgs) {
+            if ($pk.Cat -ne 'product' -and -not $chkAll.Checked -and -not $checked[$pk.Name]) { continue }
             if ($q -and ($pk.Name.ToLower().IndexOf($q) -lt 0) -and ($pk.Desc.ToLower().IndexOf($q) -lt 0)) { continue }
             $ver = if ($pk.Installed) { "installed $($pk.Installed)" } else { $pk.Version }
+            [void]$vis.Add($pk.Name)                      # record the name BEFORE ticking (ItemCheck fires on SetItemChecked)
             $i = $lst.Items.Add(("{0,-30} {1,-26} {2}" -f $pk.Name, $ver, $pk.Desc))
-            $lst.SetItemChecked($i, $checked[$pk.Name])
-            $script:dlgVisible += $pk.Name
+            if ($checked[$pk.Name]) { $lst.SetItemChecked($i, $true) }
         }
+        $script:dlgVisible = $vis.ToArray()
         $lst.EndUpdate()
+        $script:dlgBuilding = $false
     }
-    $lst.Add_ItemCheck({ param($sender, $e) $checked[$script:dlgVisible[$e.Index]] = ($e.NewValue -eq 'Checked') })
+    $lst.Add_ItemCheck({
+        param($sender, $e)
+        if ($script:dlgBuilding) { return }
+        $name = $script:dlgVisible[$e.Index]
+        if ($name) { $checked[$name] = ($e.NewValue -eq 'Checked') }
+    })
     $txtF.Add_TextChanged({ & $rebuild })
+    $chkAll.Add_CheckedChanged({ & $rebuild })
     & $rebuild
     $bDef = New-Object System.Windows.Forms.Button; $bDef.Text = 'Defaults'; $bDef.Location = New-Object System.Drawing.Point(12, 484); $bDef.Size = New-Object System.Drawing.Size(90, 27)
     $bNone = New-Object System.Windows.Forms.Button; $bNone.Text = 'None';    $bNone.Location = New-Object System.Drawing.Point(108, 484); $bNone.Size = New-Object System.Drawing.Size(90, 27)
