@@ -10,31 +10,39 @@ with a single Ethernet cable and no extra network setup:
 1. Finds the controller via IPv6 link-local neighbor discovery (`ping ff02::1%idx` + `Get-NetNeighbor 00-01-05*`).
 2. Creates/installs an SSH key (Administrator password typed once).
 3. Opens a reverse SOCKS proxy (`ssh -R 1080`) so the controller reaches `deb.beckhoff.com` **through the laptop's internet** - no Windows ICS, no second cable.
-4. Writes `/etc/apt/auth.conf.d/bhf.conf` from your myBeckhoff login, runs `apt update`, installs
-   `tc31-xar-um`, `tf2000-hmi-server`, `tf1200-ui-client`.
-5. Initializes TcHmiSrv, opens TCP 2020 in nftables, enables the service, optionally sets up TF1200 autologin/autostart.
-6. Applies DHCP or a static IPv4 address **last** via systemd-networkd (`networkctl reload`).
+4. Writes `/etc/apt/auth.conf.d/bhf.conf` from your myBeckhoff login, optionally adds the Beckhoff **testing** feed, runs `apt update`.
+5. Lets you **pick the packages** to install from a live list of the Beckhoff repository (defaults: `tc31-xar-um`, `tf2000-hmi-server`, `tf1200-ui-client`).
+6. Optionally initializes TcHmiSrv, opens TCP 2020 in nftables and enables the service; optionally sets up the TF1200 UI Client for a chosen Linux user (autologin/autostart, start URL, kiosk mode).
+7. Applies DHCP or a static IPv4 address **last** via systemd-networkd (`networkctl reload`).
 
-Based on the Beckhoff RT Linux manual v1.3 and the CX9240 setup guide (see InfoSys).
+Based on the Beckhoff RT Linux manual, the TF2000/TF1200 InfoSys pages and the CX9240 setup guide.
 
-## For customers / users
+## Download
 
-Download **`BeckhoffRTLinuxSetup.cmd`** and double-click it. That's the whole package - it opens a setup window.
+Customers: grab the latest release - **[BeckhoffRTLinuxSetup.zip](https://github.com/HurtsInTheMeow/BeckhoffRTLinuxSetup/releases/latest/download/BeckhoffRTLinuxSetup.zip)** - extract it and run `BeckhoffRTLinuxSetup.exe`. `README.txt` inside has the step-by-step instructions.
 
 Requirements: Windows 10/11 with the built-in *OpenSSH Client* (the tool offers to enable it if missing),
 internet on the laptop (Wi-Fi is fine), an Ethernet cable to the controller, a myBeckhoff account.
 
-Steps in the window: pick adapter -> **Discover** -> enter Administrator password (factory default `1`) -> **Connect**
-(the first time a console window asks for the same password once, to install the SSH key) -> fill in
-myBeckhoff login, HMI password, DHCP/static -> **Run setup**. Keep the window open and the laptop online.
-
 Windows SmartScreen may show *"Windows protected your PC"* the first time: *More info -> Run anyway* (the file is unsigned).
+
+## Using it
+
+| Section | What you do |
+|---|---|
+| 1. Controller | Pick adapter -> **Discover** -> enter Administrator password (default `1`) -> **Connect**. First time only: a console window asks for the password once to install the SSH key. |
+| 2. Repository & packages | myBeckhoff e-mail/password (empty = reuse the login stored on the controller). **Fetch package list...** opens a searchable check-list of the Beckhoff product packages in the feed (kernel/library/rebuilt-Debian packages behind a "show all" toggle); without it the defaults are installed. Optional testing feed (not for production) and delete-bhf.conf-afterwards. |
+| 3. HMI / UI Client | *Set up HMI server* (optional): `TcHmiSrv --initialize` with the admin password (`__SystemAdministrator` on port 2020), firewall rule, enable service. UI Client user (Linux user, created if missing), autologin+autostart, start URL (`startUrl` in `config.json`), kiosk mode. |
+| 4. IP address | Keep DHCP or set static address/prefix (+ optional gateway, DNS). Applied at the end; the session survives because it runs over IPv6 link-local. |
+| 5. Options | Reverse proxy port, `apt full-upgrade` first. |
+
+**Run setup** streams the controller's output into the log pane. Re-running on the same controller is safe - finished steps are detected and skipped.
 
 ## Repository layout
 
 | File | Purpose |
 |---|---|
-| `BeckhoffRTLinuxSetup.cmd` | **Customer package.** Self-launching: batch header + the GUI script in one file. |
+| `BeckhoffRTLinuxSetup.cmd` | Self-launching script variant (batch header + the GUI script in one file) - same tool as the exe, for environments where a `.cmd` is easier than an unsigned `.exe`. |
 | `BeckhoffRTLinuxSetup.ps1` | GUI source (WinForms). The `.cmd` is this file with a 13-line launcher on top. |
 | `Setup-BeckhoffRTLinux.ps1` | Console/CLI version of the same workflow (`-Target`, `-InterfaceIndex`, `-ResetHostKey`, ...). |
 | `Build-Release.bat` / `Build-Release.ps1` | Optional: compile to `.exe` (ps2exe) and build a Windows installer (Inno Setup). |
