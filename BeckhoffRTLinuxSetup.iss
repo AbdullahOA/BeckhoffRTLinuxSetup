@@ -51,7 +51,7 @@ Name: "{autodesktop}\{#MyAppName}";     Filename: "{app}\{#MyAppExeName}"; Tasks
 [Run]
 ; Add the Windows OpenSSH client if it is missing (only possible when installing as admin)
 Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) { Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 }"""; \
+  Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""if (-not (Get-Command ssh.exe -ErrorAction SilentlyContinue)) {{ Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 }"""; \
   StatusMsg: "Checking the Windows OpenSSH client..."; Flags: runhidden waituntilterminated; Check: IsAdminInstallMode
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
