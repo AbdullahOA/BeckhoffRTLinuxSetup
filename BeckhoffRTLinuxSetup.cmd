@@ -30,7 +30,7 @@ exit /b 0
          initializes TcHmiSrv, opens TCP 2020, then applies DHCP/static last.
 #>
 $ErrorActionPreference = 'Continue'
-$ToolVersion = '1.1.0'
+$ToolVersion = '1.2.0'
 $ToolAuthor  = 'Abdullah Omar, Beckhoff UAE'
 $Disclaimer  = @"
 UNOFFICIAL TOOL - PLEASE READ
@@ -64,7 +64,8 @@ $RemoteScript = @'
 set -euo pipefail
 
 PROXY_PORT=1080; NET_MODE=dhcp; NET_IFACE=end0; NET_ADDR=""; NET_GW=""; NET_DNS=""
-SET_TIME=""; UI_AUTOSTART=0; UI_URL=""; UI_KIOSK=""; FULL_UPGRADE=0; DELETE_CREDS=0; FROM_STDIN=0
+SET_TIME=""; UI_AUTOSTART=0; UI_URL=""; UI_KIOSK=""; UI_USER=Administrator; FULL_UPGRADE=0; DELETE_CREDS=0; FROM_STDIN=0
+LIST_ONLY=0; TESTING=0; PACKAGES="tc31-xar-um tf2000-hmi-server tf1200-ui-client"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --proxy-port)   PROXY_PORT=$2; shift 2 ;;
@@ -77,6 +78,10 @@ while [[ $# -gt 0 ]]; do
     --ui-autostart) UI_AUTOSTART=1; shift ;;
     --ui-url)       UI_URL=$2; shift 2 ;;
     --ui-kiosk)     UI_KIOSK=$2; shift 2 ;;
+    --ui-user)      UI_USER=$2; shift 2 ;;
+    --packages)     PACKAGES=$2; shift 2 ;;
+    --testing)      TESTING=1; shift ;;
+    --list-only)    LIST_ONLY=1; shift ;;
     --full-upgrade) FULL_UPGRADE=1; shift ;;
     --delete-creds) DELETE_CREDS=1; shift ;;
     --from-stdin)   FROM_STDIN=1; shift ;;
@@ -163,6 +168,29 @@ else
   ask_creds
 fi
 
+# ---- optional: Beckhoff testing feed --------------------------------------------
+# InfoSys "Optional: Integrate testing area": add "-testing" to the suite in bhf.list.
+# We keep the stable line and add the testing line next to it (apt picks the newest version).
+if [[ $TESTING -eq 1 ]]; then
+  step "Beckhoff testing feed (NOT for production systems)"
+  BHF_LIST=/etc/apt/sources.list.d/bhf.list
+  BHF_SRC=/etc/apt/sources.list.d/bhf.sources
+  if [[ -f "$BHF_LIST" ]]; then
+    if grep -qE 'deb\.beckhoff\.com/debian +[A-Za-z]+-testing' "$BHF_LIST"; then
+      ok "testing feed already present in $BHF_LIST"
+    else
+      tl=$(grep -E '^deb .*deb\.beckhoff\.com/debian +[A-Za-z]+ +main' "$BHF_LIST" | head -1 | sed -E 's|(deb\.beckhoff\.com/debian +[A-Za-z]+)( +main)|\1-testing\2|')
+      if [[ -n "$tl" ]]; then echo "$tl" >> "$BHF_LIST"; ok "added: $tl"
+      else warn "could not find the stable entry in $BHF_LIST - add the testing suite manually"; fi
+    fi
+  elif [[ -f "$BHF_SRC" ]]; then
+    if grep -qE '^Suites:.*-testing' "$BHF_SRC"; then ok "testing feed already present in $BHF_SRC"
+    else sed -i -E 's/^(Suites:[[:space:]]*)([A-Za-z]+)([[:space:]]*)$/\1\2 \2-testing/' "$BHF_SRC"; ok "added -testing suite to $BHF_SRC"; fi
+  else
+    warn "no bhf.list / bhf.sources found - testing feed not added"
+  fi
+fi
+
 # ---- apt update (retry on 401) ---------------------------------------------------
 step "apt update"
 for attempt in 1 2 3; do
@@ -177,11 +205,28 @@ for attempt in 1 2 3; do
     ok "package lists updated"; break
   fi
 done
+# ---- list-only: print what the Beckhoff feeds offer and stop ----------------------
+if [[ $LIST_ONLY -eq 1 ]]; then
+  step "Beckhoff package list"
+  dpkg-query -W -f='${Package}\t${Version}\n' > /tmp/bhf-inst.tsv 2>/dev/null || true
+  : > /tmp/bhf-avail.tsv
+  for f in /var/lib/apt/lists/deb.beckhoff.com_*_Packages /var/lib/apt/lists/deb-mirror.beckhoff.com_*_Packages; do
+    [[ -f "$f" ]] || continue
+    awk 'BEGIN{RS=""; FS="\n"} { p="";v="";d=""; for(i=1;i<=NF;i++){ if($i ~ /^Package: /) p=substr($i,10); else if($i ~ /^Version: /) v=substr($i,10); else if($i ~ /^Description: /) d=substr($i,14) } if(p!="") print p "\t" v "\t" d }' "$f" >> /tmp/bhf-avail.tsv
+  done
+  n=$(sort -t$'\t' -k1,1 -k2,2Vr /tmp/bhf-avail.tsv | awk -F'\t' '!seen[$1]++' | tee /tmp/bhf-avail-uniq.tsv | wc -l)
+  ok "$n packages available from the Beckhoff feed(s)"
+  echo "BHF-PKGS-BEGIN"
+  awk -F'\t' 'NR==FNR{inst[$1]=$2; next} {print $1 "\t" $2 "\t" (($1 in inst)? inst[$1] : "") "\t" $3}' /tmp/bhf-inst.tsv /tmp/bhf-avail-uniq.tsv
+  echo "BHF-PKGS-END"
+  exit 0
+fi
+
 [[ $FULL_UPGRADE -eq 1 ]] && { step "apt full-upgrade"; apt-get full-upgrade -y; }
 
 # ---- packages ----------------------------------------------------------------
-step "TwinCAT packages"
-for pkg in tc31-xar-um tf2000-hmi-server tf1200-ui-client; do
+step "TwinCAT packages: $PACKAGES"
+for pkg in $PACKAGES; do
   if dpkg -s "$pkg" >/dev/null 2>&1; then
     ok "$pkg already installed ($(dpkg-query -W -f='${Version}' "$pkg"))"
   else
@@ -194,7 +239,9 @@ systemctl is-active --quiet TcSystemServiceUm && ok "TcSystemServiceUm is runnin
 
 # ---- TF2000 HMI server: initialize, firewall, enable -----------------------------
 step "TwinCAT HMI Server (TcHmiSrv)"
-if [[ -f "$HMI_MARK" ]] || systemctl is-active --quiet TcHmiSrv.service; then
+if ! dpkg -s tf2000-hmi-server >/dev/null 2>&1; then
+  ok "tf2000-hmi-server not installed - skipping HMI server setup"
+elif [[ -f "$HMI_MARK" ]] || systemctl is-active --quiet TcHmiSrv.service; then
   ok "TcHmiSrv already initialized - skipping --initialize"
 else
   if [[ $FROM_STDIN -eq 0 ]]; then
@@ -214,7 +261,8 @@ else
   fi
 fi
 unset HMI_PW HMI_PW2 BHF_PW
-if [[ ! -f /etc/nftables.conf.d/20-hmi.conf ]]; then
+if ! dpkg -s tf2000-hmi-server >/dev/null 2>&1; then :
+elif [[ ! -f /etc/nftables.conf.d/20-hmi.conf ]]; then
   cat > /etc/nftables.conf.d/20-hmi.conf <<'EOF'
 table inet filter {
   chain input {
@@ -233,8 +281,11 @@ if [[ -f "$HMI_MARK" ]]; then
 fi
 
 # ---- TF1200 UI client ---------------------------------------------------------
-UI_USER=Administrator
 UI_BIN=/etc/TwinCAT/Functions/TF1200-UI-Client/TF1200-UI-Client
+if ! dpkg -s tf1200-ui-client >/dev/null 2>&1; then
+  step "TF1200 UI Client"; ok "tf1200-ui-client not installed - skipping UI Client setup"
+  UI_AUTOSTART=0; UI_URL=""; UI_KIOSK=""
+fi
 if [[ $UI_AUTOSTART -eq 1 ]]; then
   step "TF1200 UI Client - autologin + autostart for $UI_USER"
   SETUP=/etc/TwinCAT/Functions/TF1200-UI-Client/scripts/setup-full.sh
@@ -248,8 +299,14 @@ fi
 # startUrl / kiosk mode live in ~/.config/TF1200-UI-Client/config.json (created on the client's
 # first start, or with 'TF1200-UI-Client --exit'). Create or patch it.
 if [[ -n "$UI_URL" || -n "$UI_KIOSK" ]]; then
-  step "TF1200 UI Client - config.json"
-  UI_HOME=$(getent passwd "$UI_USER" | cut -d: -f6)
+  step "TF1200 UI Client - config.json for user $UI_USER"
+  UI_HOME=$(getent passwd "$UI_USER" | cut -d: -f6 || true)
+  if [[ -z "$UI_HOME" ]]; then
+    warn "user '$UI_USER' does not exist on the controller (setup-full.sh creates it when autologin/autostart is ticked) - config.json skipped"
+    UI_URL=""; UI_KIOSK=""
+  fi
+fi
+if [[ -n "$UI_URL" || -n "$UI_KIOSK" ]]; then
   UI_DIR="$UI_HOME/.config/TF1200-UI-Client"; UI_CFG="$UI_DIR/config.json"
   if [[ ! -f "$UI_CFG" && -x "$UI_BIN" ]]; then
     # let the client write its own defaults first (needs no display for --exit on most builds)
@@ -349,7 +406,7 @@ function Quote-Arg([string]$a) {
 }
 
 # Run a process hidden, stream stdout to the log, feed optional stdin, return code/out/err.
-function Invoke-Proc([string]$File, [string[]]$Arguments, [string]$StdIn, [switch]$Quiet) {
+function Invoke-Proc([string]$File, [string[]]$Arguments, [string]$StdIn, [switch]$Quiet, [string[]]$QuietBetween) {
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $File
     $psi.Arguments = ($Arguments | ForEach-Object { Quote-Arg $_ }) -join ' '
@@ -365,9 +422,14 @@ function Invoke-Proc([string]$File, [string[]]$Arguments, [string]$StdIn, [switc
     $p.StandardInput.Close()
     $errTask = $p.StandardError.ReadToEndAsync()
     $out = New-Object System.Text.StringBuilder
+    $mute = $false
     while ($null -ne ($line = $p.StandardOutput.ReadLine())) {
         [void]$out.AppendLine($line)
-        if (-not $Quiet) { Log $line }
+        if ($QuietBetween) {
+            if ($line -eq $QuietBetween[0]) { $mute = $true; continue }
+            if ($line -eq $QuietBetween[1]) { $mute = $false; continue }
+        }
+        if (-not $Quiet -and -not $mute) { Log $line }
     }
     $p.WaitForExit()
     $err = $errTask.Result
@@ -432,7 +494,7 @@ try {
         return
     }
 
-    # ------------------------------------------------------------------ phase: run
+    # ------------------------------------------------------------------ phases: fetch / run
     Log "==> Pushing provisioning script"
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($P.RemoteScript))
     $chunk = 6000; $first = $true
@@ -449,6 +511,33 @@ try {
 
     $utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
     $args = @('--from-stdin', '--proxy-port', $P.ProxyPort, '--set-time', "'$utc'")
+    if ($P.Testing) { $args += '--testing' }
+
+    if ($P.Phase -eq 'fetch') {
+        $args += '--list-only'
+        $remoteCmd = "sudo -S -k -p '' -- bash ~/bhf-setup.sh $($args -join ' ') 2>&1"
+        $stdin = "$($P.AdminPw)`nBHF-SECRETS-BEGIN`n$($P.BhfMail)`n$($P.BhfPw)`n`n"
+        Log "==> Fetching the Beckhoff package list over ssh -R $($P.ProxyPort) $sshHost"
+        $r = Invoke-Proc $P.SshExe ($keyed + @('-R', "$($P.ProxyPort)", $sshHost, $remoteCmd)) -StdIn $stdin -QuietBetween 'BHF-PKGS-BEGIN', 'BHF-PKGS-END'
+        if ($r.Out -match 'Sorry, try again|incorrect password attempt') { throw "sudo rejected the $($P.User) password" }
+        if ($r.Code -ne 0) { throw "package list failed with code $($r.Code) - see log above" }
+        $pkgs = @(); $in = $false
+        foreach ($line in ($r.Out -split "`n")) {
+            $line = $line.TrimEnd("`r")
+            if ($line -eq 'BHF-PKGS-BEGIN') { $in = $true; continue }
+            if ($line -eq 'BHF-PKGS-END')   { break }
+            if (-not $in) { continue }
+            $f = $line -split "`t"
+            if ($f.Count -ge 2 -and $f[0]) { $pkgs += @{ Name = $f[0]; Version = $f[1]; Installed = $(if ($f.Count -ge 3) { $f[2] } else { '' }); Desc = $(if ($f.Count -ge 4) { $f[3] } else { '' }) } }
+        }
+        if ($pkgs.Count -eq 0) { throw "no packages found in the Beckhoff feed - check the myBeckhoff login and the log" }
+        $sync.Packages = $pkgs
+        Log "    $($pkgs.Count) packages listed"
+        $sync.Ok = $true
+        return
+    }
+
+    $args += @('--packages', "'$($P.Packages)'", '--ui-user', $P.UiUser)
     if ($P.NetMode -eq 'static') {
         $args += @('--static', $P.NetAddr, '--iface', $P.NetIface)
         if ($P.NetGw)  { $args += @('--gateway', $P.NetGw) }
@@ -484,14 +573,16 @@ finally {
 # =============================================================================== GUI
 $sync = [hashtable]::Synchronized(@{
     Queue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
-    Params = @{}; Done = $false; Ok = $false; Ifaces = @(); ConnectedIface = ''; RemoteHost = ''
+    Params = @{}; Done = $false; Ok = $false; Ifaces = @(); ConnectedIface = ''; RemoteHost = ''; Packages = @()
 })
 $script:worker = $null; $script:handle = $null; $script:phase = ''
 $script:devices = @()
+$DefaultPackages = @('tc31-xar-um', 'tf2000-hmi-server', 'tf1200-ui-client')
+$script:selectedPackages = @($DefaultPackages)
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Beckhoff RT Linux Setup v$ToolVersion  -  UNOFFICIAL tool by $ToolAuthor"
-$form.ClientSize = New-Object System.Drawing.Size(760, 850)
+$form.ClientSize = New-Object System.Drawing.Size(760, 882)
 $form.StartPosition = 'CenterScreen'
 $form.FormBorderStyle = 'FixedSingle'
 $form.MaximizeBox = $false
@@ -543,29 +634,43 @@ $btnConnect = Add-Button $g1 'Connect' 630 24 90
 $btnConnect.Enabled = $false
 
 # ---- 2. myBeckhoff
-$g2 = Add-Group '2. Beckhoff package repository (myBeckhoff account)' 138 88
+$g2 = Add-Group '2. Beckhoff package repository (myBeckhoff account) and packages' 138 150
 Add-Label $g2 'E-mail' 12 26 | Out-Null
 $txtBhfMail = Add-Text $g2 150 26 300
 Add-Label $g2 'Password' 12 56 | Out-Null
 $txtBhfPw = Add-Text $g2 150 56 300 -Password
 $lblBhfHint = Add-Label $g2 'Leave both empty to keep an existing /etc/apt/auth.conf.d/bhf.conf on the controller' 460 26 270
 $lblBhfHint.Size = New-Object System.Drawing.Size(270, 50)
+$chkDeleteCreds = Add-Check $g2 'Delete bhf.conf from the controller when finished' 12 84 330
+$chkTesting = Add-Check $g2 'Add Beckhoff testing feed (NOT for production systems)' 370 84 350
+$btnFetch = Add-Button $g2 'Fetch package list...' 12 112 150
+$btnFetch.Enabled = $false
+$lblPackages = Add-Label $g2 '' 170 114 555
+function Update-PackageLabel {
+    $n = $script:selectedPackages.Count
+    $txt = if ($n) { ($script:selectedPackages -join ', ') } else { '(none)' }
+    if ($txt.Length -gt 90) { $txt = $txt.Substring(0, 87) + '...' }
+    $lblPackages.Text = "Install ($n): $txt"
+}
+Update-PackageLabel
 
 # ---- 3. HMI
-$g3 = Add-Group '3. TwinCAT HMI Server (TF2000) / UI Client (TF1200)' 234 118
+$g3 = Add-Group '3. TwinCAT HMI Server (TF2000) / UI Client (TF1200)' 296 118
 Add-Label $g3 'HMI admin password' 12 26 | Out-Null
 $txtHmiPw = Add-Text $g3 150 26 200 -Password
 Add-Label $g3 'Repeat' 12 56 | Out-Null
 $txtHmiPw2 = Add-Text $g3 150 56 200 -Password
-$chkUiAutostart = Add-Check $g3 'TF1200 UI Client: autologin + autostart for Administrator' 370 26 360
-$chkUiKiosk = Add-Check $g3 'Kiosk mode (full screen, no menu bar)' 370 56 360
+Add-Label $g3 'UI Client user' 370 26 100 | Out-Null
+$txtUiUser = Add-Text $g3 475 26 130 -Default 'Administrator'
+$lblUiUserHint = Add-Label $g3 '(Linux user; created if missing)' 610 26 120
+$lblUiUserHint.Size = New-Object System.Drawing.Size(120, 40)
+$chkUiAutostart = Add-Check $g3 'TF1200: autologin + autostart for that user' 370 56 360
 Add-Label $g3 'UI Client start URL' 12 86 | Out-Null
-$txtUiUrl = Add-Text $g3 150 86 400 -Default 'http://127.0.0.1:2020/'
-$lblUiHint = Add-Label $g3 '(startUrl in config.json; empty = leave as is)' 560 86 170
-$lblUiHint.Size = New-Object System.Drawing.Size(170, 40)
+$txtUiUrl = Add-Text $g3 150 86 300 -Default 'http://127.0.0.1:2020/'
+$chkUiKiosk = Add-Check $g3 'Kiosk mode (full screen, no menu bar)' 460 86 270
 
 # ---- 4. network
-$g4 = Add-Group '4. Controller IP address (applied last, via systemd-networkd)' 360 130
+$g4 = Add-Group '4. Controller IP address (applied last, via systemd-networkd)' 422 130
 $rbDhcp = New-Object System.Windows.Forms.RadioButton
 $rbDhcp.Text = 'Keep DHCP / auto (factory default)'; $rbDhcp.Location = New-Object System.Drawing.Point(15, 26); $rbDhcp.Size = New-Object System.Drawing.Size(260, 22); $rbDhcp.Checked = $true
 $rbStatic = New-Object System.Windows.Forms.RadioButton
@@ -585,23 +690,22 @@ foreach ($c in @($txtAddr, $txtGw, $txtDns)) { $c.Enabled = $false }
 $rbStatic.Add_CheckedChanged({ foreach ($c in @($txtAddr, $txtGw, $txtDns)) { $c.Enabled = $rbStatic.Checked } })
 
 # ---- 5. options
-$g5 = Add-Group '5. Options' 498 58
+$g5 = Add-Group '5. Options' 560 58
 Add-Label $g5 'Reverse proxy port' 12 24 | Out-Null
 $txtProxyPort = Add-Text $g5 150 24 70 -Default '1080'
-$chkFullUpgrade = Add-Check $g5 'apt full-upgrade first' 240 24 170
-$chkDeleteCreds = Add-Check $g5 'Delete bhf.conf when finished' 420 24 230
+$chkFullUpgrade = Add-Check $g5 'apt full-upgrade before installing packages' 240 24 320
 
 # ---- run / log
-$btnRun = Add-Button $form 'Run setup' 12 566 140
+$btnRun = Add-Button $form 'Run setup' 12 628 140
 $btnRun.Enabled = $false
-$lblStatus = Add-Label $form 'Pick the adapter connected to the controller, then Discover.' 170 568 570
+$lblStatus = Add-Label $form 'Pick the adapter connected to the controller, then Discover.' 170 630 570
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Multiline = $true; $txtLog.ReadOnly = $true; $txtLog.ScrollBars = 'Vertical'; $txtLog.WordWrap = $false
 $txtLog.Font = New-Object System.Drawing.Font('Consolas', 9)
-$txtLog.Location = New-Object System.Drawing.Point(12, 602); $txtLog.Size = New-Object System.Drawing.Size(736, 216)
+$txtLog.Location = New-Object System.Drawing.Point(12, 664); $txtLog.Size = New-Object System.Drawing.Size(736, 186)
 $txtLog.BackColor = [System.Drawing.Color]::White
 $form.Controls.Add($txtLog)
-$lblFooter = Add-Label $form "Unofficial tool by $ToolAuthor - not an official or supported Beckhoff product. Use at your own risk." 12 824 736
+$lblFooter = Add-Label $form "Unofficial tool by $ToolAuthor - not an official or supported Beckhoff product. Use at your own risk." 12 856 736
 $lblFooter.ForeColor = [System.Drawing.Color]::DarkRed
 
 function Log([string]$m) { $txtLog.AppendText($m + "`r`n") }
@@ -672,6 +776,65 @@ $btnDiscover.Add_Click({
     Set-Status "$($found.Count) controller(s) found - match the MAC with the name plate, enter the password, Connect."
 })
 
+# ---- package selection dialog
+function Show-PackageDialog($pkgs) {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "Beckhoff packages available from the repository ($($pkgs.Count))"
+    $dlg.ClientSize = New-Object System.Drawing.Size(860, 520)
+    $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MinimizeBox = $false; $dlg.MaximizeBox = $false
+    $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $hdr = New-Object System.Windows.Forms.Label
+    $hdr.Text = 'Tick the packages to install. Already-installed packages are marked; ticking them is harmless (apt skips them).'
+    $hdr.Location = New-Object System.Drawing.Point(12, 10); $hdr.Size = New-Object System.Drawing.Size(836, 20)
+    $dlg.Controls.Add($hdr)
+    $lst = New-Object System.Windows.Forms.CheckedListBox
+    $lst.Location = New-Object System.Drawing.Point(12, 34); $lst.Size = New-Object System.Drawing.Size(836, 440)
+    $lst.CheckOnClick = $true; $lst.Font = New-Object System.Drawing.Font('Consolas', 9); $lst.HorizontalScrollbar = $true
+    $names = @()
+    foreach ($pk in $pkgs) {
+        $ver = if ($pk.Installed) { "installed $($pk.Installed)" } else { $pk.Version }
+        $i = $lst.Items.Add(("{0,-30} {1,-26} {2}" -f $pk.Name, $ver, $pk.Desc))
+        if ($script:selectedPackages -contains $pk.Name) { $lst.SetItemChecked($i, $true) }
+        $names += $pk.Name
+    }
+    $dlg.Controls.Add($lst)
+    $bDef = New-Object System.Windows.Forms.Button; $bDef.Text = 'Defaults'; $bDef.Location = New-Object System.Drawing.Point(12, 484); $bDef.Size = New-Object System.Drawing.Size(90, 27)
+    $bNone = New-Object System.Windows.Forms.Button; $bNone.Text = 'None';    $bNone.Location = New-Object System.Drawing.Point(108, 484); $bNone.Size = New-Object System.Drawing.Size(90, 27)
+    $bOk = New-Object System.Windows.Forms.Button;  $bOk.Text = 'OK';      $bOk.Location = New-Object System.Drawing.Point(662, 484); $bOk.Size = New-Object System.Drawing.Size(90, 27); $bOk.DialogResult = 'OK'
+    $bCan = New-Object System.Windows.Forms.Button; $bCan.Text = 'Cancel';  $bCan.Location = New-Object System.Drawing.Point(758, 484); $bCan.Size = New-Object System.Drawing.Size(90, 27); $bCan.DialogResult = 'Cancel'
+    $bDef.Add_Click({ for ($i = 0; $i -lt $names.Count; $i++) { $lst.SetItemChecked($i, ($DefaultPackages -contains $names[$i])) } })
+    $bNone.Add_Click({ for ($i = 0; $i -lt $names.Count; $i++) { $lst.SetItemChecked($i, $false) } })
+    $dlg.Controls.AddRange(@($bDef, $bNone, $bOk, $bCan))
+    $dlg.AcceptButton = $bOk; $dlg.CancelButton = $bCan
+    if ($dlg.ShowDialog($form) -eq 'OK') {
+        $sel = @()
+        for ($i = 0; $i -lt $names.Count; $i++) { if ($lst.GetItemChecked($i)) { $sel += $names[$i] } }
+        $script:selectedPackages = $sel
+        Update-PackageLabel
+        Log "==> Packages selected: $(if ($sel.Count) { $sel -join ' ' } else { '(none)' })"
+    }
+    $dlg.Dispose()
+}
+
+$btnFetch.Add_Click({
+    if ($cbDevice.SelectedIndex -lt 0) { Show-Error 'Connect to the controller first.'; return }
+    $errs = @()
+    if (-not $txtAdminPw.Text) { $errs += 'Administrator password is required (sudo).' }
+    if (($txtBhfMail.Text -ne '') -ne ($txtBhfPw.Text -ne '')) { $errs += 'myBeckhoff: enter both e-mail and password, or neither.' }
+    if ($txtBhfPw.Text -match '\s') { $errs += "myBeckhoff password contains whitespace - apt's netrc format cannot store that." }
+    $port = 0
+    if (-not [int]::TryParse($txtProxyPort.Text, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) { $errs += 'Proxy port must be 1024-65535.' }
+    if ($errs.Count) { Show-Error ($errs -join "`n"); return }
+    $d = $script:devices[$cbDevice.SelectedIndex]
+    Set-Status 'Fetching the package list (apt update through this PC) ...'
+    Start-Worker 'fetch' @{
+        Phase = 'fetch'; SshExe = $sshExe; SshKeygenExe = $keygenExe; KeyPath = $keyPath
+        User = 'Administrator'; Target = $d.Target; DeviceMac = $d.Mac; RemoteScript = $RemoteScript
+        AdminPw = $txtAdminPw.Text; BhfMail = $txtBhfMail.Text.Trim(); BhfPw = $txtBhfPw.Text
+        ProxyPort = $port; Testing = $chkTesting.Checked
+    }
+})
+
 # ---- worker start/finish
 function Start-Worker([string]$Phase, [hashtable]$Params) {
     $sync.Params = $Params; $sync.Done = $false; $sync.Ok = $false
@@ -680,7 +843,7 @@ function Start-Worker([string]$Phase, [hashtable]$Params) {
     $script:worker = [powershell]::Create(); $script:worker.Runspace = $rs
     [void]$script:worker.AddScript($WorkerScript).AddArgument($sync)
     $script:handle = $script:worker.BeginInvoke()
-    foreach ($c in @($btnDiscover, $btnConnect, $btnRun)) { $c.Enabled = $false }
+    foreach ($c in @($btnDiscover, $btnConnect, $btnRun, $btnFetch)) { $c.Enabled = $false }
     $form.UseWaitCursor = $true
 }
 
@@ -699,9 +862,13 @@ $timer.Add_Tick({
                 foreach ($i in $sync.Ifaces) { [void]$cbIface.Items.Add($i) }
                 if ($cbIface.Items.Count) { $cbIface.SelectedIndex = [Math]::Max(0, $cbIface.Items.IndexOf($sync.ConnectedIface)) }
                 $lblIfaceHint.Text = "(you are connected on $($sync.ConnectedIface))"
-                $btnRun.Enabled = $true
-                Set-Status "Connected to $($sync.RemoteHost). Fill in sections 2-4, then Run setup."
+                $btnRun.Enabled = $true; $btnFetch.Enabled = $true
+                Set-Status "Connected to $($sync.RemoteHost). Fill in sections 2-4 (optionally pick packages), then Run setup."
             } else { Set-Status 'Connect failed - see log.' }
+        } elseif ($script:phase -eq 'fetch') {
+            $btnRun.Enabled = $true; $btnFetch.Enabled = $true
+            if ($sync.Ok) { Set-Status "$($sync.Packages.Count) packages listed - pick what to install."; Show-PackageDialog $sync.Packages }
+            else { Set-Status 'Fetching the package list failed - see log.' }
         } else {
             if ($sync.Ok) {
                 Set-Status 'Setup finished.'
@@ -739,7 +906,10 @@ $btnRun.Add_Click({
     if (($txtBhfMail.Text -ne '') -ne ($txtBhfPw.Text -ne '')) { $errs += 'myBeckhoff: enter both e-mail and password, or neither.' }
     if ($txtBhfPw.Text -match '\s') { $errs += "myBeckhoff password contains whitespace - apt's netrc format cannot store that; change it on myBeckhoff first." }
     if ($txtHmiPw.Text -ne $txtHmiPw2.Text) { $errs += 'HMI passwords do not match.' }
-    if (-not $txtHmiPw.Text) { $errs += 'HMI admin password is required (TcHmiSrv --initialize).' }
+    if (-not $txtHmiPw.Text -and ($script:selectedPackages -contains 'tf2000-hmi-server')) { $errs += 'HMI admin password is required (TcHmiSrv --initialize).' }
+    if ($script:selectedPackages.Count -eq 0) { $errs += 'No packages selected - use "Fetch package list..." to pick at least one.' }
+    $uiUser = $txtUiUser.Text.Trim()
+    if ($uiUser -notmatch '^[a-z_][a-z0-9_-]{0,31}$' -and $uiUser -ne 'Administrator') { $errs += 'UI Client user must be a valid Linux user name (lowercase letters, digits, - and _), or Administrator.' }
     $port = 0
     if (-not [int]::TryParse($txtProxyPort.Text, [ref]$port) -or $port -lt 1024 -or $port -gt 65535) { $errs += 'Proxy port must be 1024-65535.' }
     if ($cbIface.SelectedIndex -lt 0) { $errs += 'No controller interface selected - Connect first.' }
@@ -760,7 +930,8 @@ $btnRun.Add_Click({
         AdminPw = $txtAdminPw.Text; BhfMail = $txtBhfMail.Text.Trim(); BhfPw = $txtBhfPw.Text; HmiPw = $txtHmiPw.Text
         NetMode = $(if ($rbStatic.Checked) { 'static' } else { 'dhcp' })
         NetIface = $cbIface.SelectedItem; NetAddr = $txtAddr.Text.Trim(); NetGw = $txtGw.Text.Trim(); NetDns = $txtDns.Text.Trim()
-        ProxyPort = $port; UiAutostart = $chkUiAutostart.Checked; UiUrl = $uiUrl; UiKiosk = $chkUiKiosk.Checked
+        ProxyPort = $port; UiAutostart = $chkUiAutostart.Checked; UiUrl = $uiUrl; UiKiosk = $chkUiKiosk.Checked; UiUser = $uiUser
+        Packages = ($script:selectedPackages -join ' '); Testing = $chkTesting.Checked
         FullUpgrade = $chkFullUpgrade.Checked; DeleteCreds = $chkDeleteCreds.Checked
     }
 })
