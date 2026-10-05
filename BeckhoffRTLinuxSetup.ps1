@@ -455,6 +455,8 @@ try {
     # ------------------------------------------------------------------ phase: connect
     if ($P.Phase -eq 'connect') {
         Log "==> SSH key"
+        $sshDir = Split-Path -Parent $P.KeyPath
+        if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null; Log "    created $sshDir" }
         if (-not (Test-Path $P.KeyPath)) {
             Log "    generating $($P.KeyPath) (ed25519, no passphrase)"
             $r = Invoke-Proc $P.SshKeygenExe @('-q', '-t', 'ed25519', '-f', $P.KeyPath, '-N', '', '-C', "beckhoff-setup@$env:COMPUTERNAME") -Quiet
